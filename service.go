@@ -1,22 +1,26 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	apiClient "github.com/fsouza/go-dockerclient"
 )
 
 type Service struct {
 	Name         string
+	LogPrefix    string
 	Image        string   `yaml:"image"`
 	BuildDir     string   `yaml:"build"`
 	Command      string   `yaml:"command"`
 	Links        []string `yaml:"links"`
 	Ports        []string `yaml:"ports"`
 	Volumes      []string `yaml:"volumes"`
+	IsBase       bool
 	ExposedPorts map[apiClient.Port]struct{}
 	Container    apiClient.Container
 	api          *apiClient.Client
@@ -75,9 +79,23 @@ func (s *Service) Create() error {
 		Cmd:          strings.Fields(s.Command),
 		ExposedPorts: s.ExposedPorts,
 	}
-	opts := apiClient.CreateContainerOptions{Name: s.Name, Config: &config}
-	container, err := s.api.CreateContainer(opts)
+	createOpts := apiClient.CreateContainerOptions{
+		Name:   s.Name,
+		Config: &config,
+	}
+	container, err := s.api.CreateContainer(createOpts)
 	if err != nil {
+		if err == apiClient.ErrNoSuchImage {
+			pullOpts := apiClient.PullImageOptions{
+				Repository: s.Image,
+			}
+			fmt.Println("Unable to find image", s.Image, "locally, pulling...")
+			err = s.api.PullImage(pullOpts, apiClient.AuthConfiguration{})
+			if err != nil {
+				return err
+			}
+			s.Create()
+		}
 		return err
 	}
 	s.Container = *container
@@ -100,10 +118,29 @@ func (s *Service) Start() error {
 	return nil
 }
 
+func (s *Service) Restart() error {
+	err := s.api.RestartContainer(s.Name, 10)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Service) Stop() error {
 	err := s.api.StopContainer(s.Name, 10)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "attempt to stop container ", s.Name, "failed", err)
+		return err
+	}
+	return nil
+}
+
+func (s *Service) Kill() error {
+	options := apiClient.KillContainerOptions{
+		ID: s.Name,
+	}
+	err := s.api.KillContainer(options)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -113,7 +150,7 @@ func (s *Service) Remove() error {
 		ID: s.Name,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "attempt to remove container ", s.Name, "failed", err)
+		fmt.Fprintln(os.Stderr, "attempt to remove container ", s.Name, "failed", err)
 	}
 	return nil
 }
@@ -121,8 +158,8 @@ func (s *Service) Remove() error {
 func (s *Service) IsRunning() bool {
 	container, err := s.api.InspectContainer(s.Name)
 	if err != nil {
-		if _, ok := err.(apiClient.NoSuchContainer); ok {
-			fmt.Fprintf(os.Stderr, "unknown error checking if container is running: ", err)
+		if _, ok := err.(*apiClient.NoSuchContainer); !ok {
+			fmt.Fprintln(os.Stderr, "non-NoSuchContainer error checking if container is running: ", err)
 		}
 		return false
 	}
@@ -132,20 +169,29 @@ func (s *Service) IsRunning() bool {
 func (s *Service) Exists() bool {
 	_, err := s.api.InspectContainer(s.Name)
 	if err != nil {
-		if _, ok := err.(apiClient.NoSuchContainer); ok {
-			fmt.Fprintf(os.Stderr, "unknown error checking if container is running: ", err)
+		if _, ok := err.(*apiClient.NoSuchContainer); !ok {
+			fmt.Fprintln(os.Stderr, "non-NoSuchContainer error checking if container is running: ", err)
 		}
 		return false
 	}
 	return true
 }
 
-func (s *Service) Wait(name string) (int, error) {
-	exitCode, err := s.api.WaitContainer(name)
-	return exitCode, err
+func (s *Service) Wait(wg *sync.WaitGroup) (int, error) {
+	exited := make(chan int)
+	go func(s Service) {
+		exitCode, err := s.api.WaitContainer(s.Name)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "container wait had error", err)
+		}
+		exited <- exitCode
+	}(*s)
+	exitCode := <-exited
+	wg.Done()
+	return exitCode, nil
 }
 
-func (s *Service) Attach() (io.Reader, error) {
+func (s *Service) Attach() error {
 	r, w := io.Pipe()
 	options := apiClient.AttachToContainerOptions{
 		Container:    s.Name,
@@ -158,5 +204,14 @@ func (s *Service) Attach() (io.Reader, error) {
 	}
 	fmt.Println("Attaching to container", s.Name)
 	go s.api.AttachToContainer(options)
-	return r, nil
+	go func(reader io.Reader, s Service) {
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			fmt.Printf("%s%s \n", s.LogPrefix, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintln(os.Stderr, "There was an error with the scanner in attached container", err)
+		}
+	}(r, *s)
+	return nil
 }
