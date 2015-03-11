@@ -3,6 +3,7 @@ from __future__ import unicode_literals
 from inspect import getdoc
 from operator import attrgetter
 import logging
+import os
 import re
 import signal
 import sys
@@ -286,7 +287,9 @@ class TopLevelCommand(Command):
         """
         service = project.get_service(options['SERVICE'])
 
-        insecure_registry = options['--allow-insecure-ssl']
+        insecure_registry = options['--allow-insecure-ssl'] or \
+                            bool(os.getenv('COMPOSE_ALLOW_INSECURE_SSL'))
+
 
         if not options['--no-deps']:
             deps = service.get_linked_names()
