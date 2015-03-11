@@ -224,7 +224,8 @@ class TopLevelCommand(Command):
             --allow-insecure-ssl    Allow insecure connections to the docker
                                     registry
         """
-        insecure_registry = options['--allow-insecure-ssl']
+        insecure_registry = options['--allow-insecure-ssl'] or \
+                            bool(os.getenv('COMPOSE_ALLOW_INSECURE_SSL'))
         project.pull(
             service_names=options['SERVICE'],
             insecure_registry=insecure_registry
@@ -430,7 +431,8 @@ class TopLevelCommand(Command):
             --no-recreate         If containers already exist, don't recreate them.
             --no-build            Don't build an image, even if it's missing
         """
-        insecure_registry = options['--allow-insecure-ssl']
+        insecure_registry = options['--allow-insecure-ssl'] or \
+                            bool(os.getenv('COMPOSE_ALLOW_INSECURE_SSL'))
         detached = options['-d']
 
         monochrome = options['--no-color']
